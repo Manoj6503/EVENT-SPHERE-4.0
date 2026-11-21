@@ -1,0 +1,9 @@
+build/
+*.db
+*.db-journal
+.env
+node_modules/
+cloudflared
+tunnel.log
+certificates/
+backups/

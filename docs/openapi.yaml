@@ -1,0 +1,371 @@
+openapi: 3.0.3
+info:
+  title: EventSphere API
+  version: "10.0"
+  description: |
+    REST API of the EventSphere college event platform (C++ / SQLite).
+
+    **Authentication** – `POST /api/login` sets two cookies: `sid` (HttpOnly session) and `csrf`.
+    Every later **POST** must send the `csrf` cookie value in the `X-CSRF-Token` header (login and signup are exempt).
+    Browsers using the web app do this automatically.
+
+    **Roles** – `student`, `organizer` (approved by an admin) and `admin`.
+    Errors always look like `{"error":"message"}`.
+servers:
+  - url: /
+tags:
+  - {name: Public, description: No login needed}
+  - {name: Auth}
+  - {name: Events}
+  - {name: Registration}
+  - {name: Attendance}
+  - {name: Certificates}
+  - {name: Organizer}
+  - {name: Admin}
+components:
+  securitySchemes:
+    session: {type: apiKey, in: cookie, name: sid}
+    csrf: {type: apiKey, in: header, name: X-CSRF-Token}
+  schemas:
+    Error:
+      type: object
+      properties: {error: {type: string}}
+    Ok:
+      type: object
+      properties: {message: {type: string}}
+    User:
+      type: object
+      properties: {name: {type: string}, email: {type: string}, role: {type: string, enum: [student, organizer, admin]}}
+    Credentials:
+      type: object
+      required: [email, password]
+      properties: {email: {type: string}, password: {type: string, minLength: 8}}
+    Signup:
+      type: object
+      required: [name, email, password]
+      properties: {name: {type: string, maxLength: 100}, email: {type: string}, password: {type: string, minLength: 8}}
+    EventInput:
+      type: object
+      required: [title, category, venue, event_date, reg_open, reg_close, capacity]
+      properties:
+        title: {type: string, maxLength: 150}
+        description: {type: string, maxLength: 3000}
+        category: {type: string, example: Seminar}
+        form_type: {type: string, description: Optional form template name}
+        custom_fields: {type: array, description: "Up to 8 extra questions", items: {type: object}}
+        venue: {type: string, maxLength: 150}
+        banner: {type: string, description: "http(s) image link or empty"}
+        event_date: {type: string, format: date}
+        start_time: {type: string, example: "10:00"}
+        reg_open: {type: string, format: date}
+        reg_close: {type: string, format: date, description: Must not be after event_date}
+        capacity: {type: integer, minimum: 1, maximum: 100000}
+    Event:
+      type: object
+      additionalProperties: true
+      properties: {id: {type: integer}, title: {type: string}, status: {type: string, enum: [pending, published, rejected]}, taken: {type: integer}, capacity: {type: integer}}
+    Review:
+      type: object
+      required: [action]
+      properties: {action: {type: string, enum: [approve, reject]}, note: {type: string, description: Required when rejecting}}
+    Answers:
+      type: object
+      required: [answers]
+      properties: {answers: {type: object, additionalProperties: true, description: Values keyed by form field key}}
+    Registration:
+      type: object
+      additionalProperties: true
+      properties: {id: {type: integer}, reg_code: {type: string, example: REG-A64F2765}, status: {type: string}, qr_token: {type: string}, cert_id: {type: string, nullable: true}}
+    CheckIn:
+      type: object
+      required: [event_id, token]
+      properties: {event_id: {type: integer}, token: {type: string, description: QR token or REG-xxxx registration code}}
+    LiveSnapshot:
+      type: object
+      properties:
+        registered: {type: integer}
+        present: {type: integer}
+        recent: {type: array, items: {type: object, properties: {name: {type: string}, checked_in_at: {type: string}}}}
+  responses:
+    Unauthorized: {description: Not logged in, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: Role not allowed or CSRF token missing, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    BadRequest: {description: Validation failed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: "Conflicts with current state (full, duplicate, already done)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooMany: {description: Rate limit reached, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: integer}}
+    CertId: {name: certId, in: path, required: true, schema: {type: string}, example: CERT-1A2B3C}
+security:
+  - session: []
+    csrf: []
+paths:
+  /api/health:
+    get:
+      tags: [Public]
+      summary: Health check (for uptime monitors / Render)
+      security: []
+      responses:
+        "200": {description: Server and database are up, content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, schema_version: {type: integer}}}}}}
+  /api/public/stats:
+    get:
+      tags: [Public]
+      summary: Counters for the home page
+      security: []
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+  /api/form-templates:
+    get:
+      tags: [Public]
+      summary: Registration form templates and categories
+      security: []
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+  /api/signup:
+    post:
+      tags: [Auth]
+      summary: Create a student account
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Signup'}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Ok'}}}}
+        "400": {$ref: '#/components/responses/BadRequest'}
+        "409": {$ref: '#/components/responses/Conflict'}
+        "429": {$ref: '#/components/responses/TooMany'}
+  /api/login:
+    post:
+      tags: [Auth]
+      summary: Log in (sets the sid and csrf cookies)
+      description: Email is case-insensitive. 10 wrong passwords lock the account for 10 minutes; LOGIN_LIMIT_PER_10MIN attempts (default 300) per IP.
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Credentials'}}}}
+      responses:
+        "200": {description: Logged in, content: {application/json: {schema: {type: object, properties: {user: {$ref: '#/components/schemas/User'}}}}}}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "429": {$ref: '#/components/responses/TooMany'}
+  /api/logout:
+    post:
+      tags: [Auth]
+      summary: Log out and destroy the session
+      responses: {"200": {description: OK}}
+  /api/me:
+    get:
+      tags: [Auth]
+      summary: Current user (null when logged out)
+      security: []
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {user: {allOf: [{$ref: '#/components/schemas/User'}], nullable: true}}}}}}}
+  /api/events:
+    get:
+      tags: [Events]
+      summary: Published events (search and filter)
+      security: []
+      parameters:
+        - {name: q, in: query, schema: {type: string}, description: Searches title and description (wildcards are escaped)}
+        - {name: category, in: query, schema: {type: string}}
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {events: {type: array, items: {$ref: '#/components/schemas/Event'}}}}}}}}
+    post:
+      tags: [Events]
+      summary: Propose an event (organizer) – it waits for admin approval
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/EventInput'}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Ok'}}}}
+        "400": {$ref: '#/components/responses/BadRequest'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+  /api/events/{id}:
+    get:
+      tags: [Events]
+      summary: One published event with its registration form
+      security: []
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {"200": {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/Event'}}}}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/events/{id}/update:
+    post:
+      tags: [Events]
+      summary: Edit your event (goes back to review). Capacity cannot drop below confirmed registrations.
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/EventInput'}}}}
+      responses: {"200": {description: Updated}, "400": {$ref: '#/components/responses/BadRequest'}, "403": {$ref: '#/components/responses/Forbidden'}, "404": {$ref: '#/components/responses/NotFound'}, "409": {$ref: '#/components/responses/Conflict'}}
+  /api/my/events:
+    get:
+      tags: [Events]
+      summary: Events owned by the logged-in organizer
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {events: {type: array, items: {$ref: '#/components/schemas/Event'}}}}}}}, "401": {$ref: '#/components/responses/Unauthorized'}}
+  /api/events/{id}/register:
+    post:
+      tags: [Registration]
+      summary: Register the logged-in student
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Answers'}}}}
+      responses:
+        "201": {description: Registered, content: {application/json: {schema: {type: object, properties: {reg_code: {type: string}}}}}}
+        "400": {$ref: '#/components/responses/BadRequest'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "409": {$ref: '#/components/responses/Conflict'}
+  /api/my/registrations:
+    get:
+      tags: [Registration]
+      summary: My registrations with QR tokens and certificate ids
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {registrations: {type: array, items: {$ref: '#/components/schemas/Registration'}}}}}}}, "401": {$ref: '#/components/responses/Unauthorized'}}
+  /api/registrations/{id}/cancel:
+    post:
+      tags: [Registration]
+      summary: Cancel my registration (not possible after attendance is marked)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {"200": {description: Cancelled}, "404": {$ref: '#/components/responses/NotFound'}, "409": {$ref: '#/components/responses/Conflict'}}
+  /api/events/{id}/participants:
+    get:
+      tags: [Attendance]
+      summary: Participants of an event (organizer owner or admin)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/events/{id}/checkin-qr:
+    get:
+      tags: [Attendance]
+      summary: Rotating self-check-in token for the organizer's live QR
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/events/{id}/live:
+    get:
+      tags: [Attendance]
+      summary: Live attendance stream (Server-Sent Events)
+      description: Sends a `LiveSnapshot` JSON message immediately and again whenever anyone registers, cancels or checks in (plus a refresh every 15 s). Max 30 concurrent streams.
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        "200": {description: Event stream, content: {text/event-stream: {schema: {$ref: '#/components/schemas/LiveSnapshot'}}}}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "503": {description: Too many live connections}
+  /api/attendance/check:
+    post:
+      tags: [Attendance]
+      summary: Organizer scans a student's QR or types a registration code
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CheckIn'}}}}
+      responses:
+        "200": {description: "result is ok or already; certificate_pending is true until a signing authority is saved", content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "404": {$ref: '#/components/responses/NotFound'}
+        "409": {$ref: '#/components/responses/Conflict'}
+  /api/attendance/self:
+    post:
+      tags: [Attendance]
+      summary: Student scans the organizer's live QR
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {event_id: {type: integer}, token: {type: string}}}}}}
+      responses: {"200": {description: Attendance marked}, "409": {$ref: '#/components/responses/Conflict'}}
+  /api/certificates/{certId}/download:
+    get:
+      tags: [Certificates]
+      summary: Certificate PDF (owner, event organizer or admin)
+      parameters: [{$ref: '#/components/parameters/CertId'}]
+      responses: {"200": {description: PDF, content: {application/pdf: {schema: {type: string, format: binary}}}}, "403": {$ref: '#/components/responses/Forbidden'}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/certificates/{certId}/resend:
+    post:
+      tags: [Certificates]
+      summary: Email the certificate again
+      parameters: [{$ref: '#/components/parameters/CertId'}]
+      responses: {"200": {description: Queued}, "403": {$ref: '#/components/responses/Forbidden'}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/certificates/verify/{certId}:
+    get:
+      tags: [Certificates]
+      summary: Public certificate verification (case-insensitive)
+      security: []
+      parameters: [{$ref: '#/components/parameters/CertId'}]
+      responses: {"200": {description: Valid certificate, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/organizer/request:
+    get:
+      tags: [Organizer]
+      summary: My organizer-access request status
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+    post:
+      tags: [Organizer]
+      summary: Ask the admin for organizer access
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {organization: {type: string}, event_title: {type: string}, event_category: {type: string}, event_description: {type: string}, reason: {type: string}}}}}}
+      responses: {"201": {description: Submitted}, "400": {$ref: '#/components/responses/BadRequest'}, "409": {$ref: '#/components/responses/Conflict'}}
+  /api/organizer/certificate-authority:
+    get:
+      tags: [Organizer]
+      summary: My certificate signing authority (name, designation, signature)
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+    post:
+      tags: [Organizer]
+      summary: Save the signing authority; waiting certificates are issued immediately
+      requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {authority_name: {type: string}, designation: {type: string}, signature: {type: string, description: "base64 JPEG, optional"}}}}}}
+      responses: {"200": {description: "Saved; issued = number of certificates released", content: {application/json: {schema: {type: object, properties: {issued: {type: integer}}}}}}, "400": {$ref: '#/components/responses/BadRequest'}}
+  /api/notifications:
+    get:
+      tags: [Auth]
+      summary: My notifications
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "401": {$ref: '#/components/responses/Unauthorized'}}
+  /api/notifications/read:
+    post:
+      tags: [Auth]
+      summary: Mark all notifications as read
+      responses: {"200": {description: OK}}
+  /api/admin/stats:
+    get:
+      tags: [Admin]
+      summary: Dashboard counters
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/events:
+    get:
+      tags: [Admin]
+      summary: All events with status
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {events: {type: array, items: {$ref: '#/components/schemas/Event'}}}}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/events/{id}/review:
+    post:
+      tags: [Admin]
+      summary: Approve (publish) or reject an event
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Review'}}}}
+      responses: {"200": {description: Reviewed}, "400": {$ref: '#/components/responses/BadRequest'}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/admin/registrations:
+    get:
+      tags: [Admin]
+      summary: Registrations across all events
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/organizer-requests:
+    get:
+      tags: [Admin]
+      summary: Organizer access requests
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/organizer-requests/{id}/review:
+    post:
+      tags: [Admin]
+      summary: Approve or reject an organizer request
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Review'}}}}
+      responses: {"200": {description: Reviewed}, "400": {$ref: '#/components/responses/BadRequest'}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/admin/organizers:
+    get:
+      tags: [Admin]
+      summary: Current organizers
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/organizers/{id}/revoke:
+    post:
+      tags: [Admin]
+      summary: Remove organizer access (account becomes a student)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses: {"200": {description: Revoked}, "404": {$ref: '#/components/responses/NotFound'}}
+  /api/admin/certificate-settings:
+    get:
+      tags: [Admin]
+      summary: College-wide certificate settings
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+    post:
+      tags: [Admin]
+      summary: Save college-wide certificate settings
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses: {"200": {description: Saved}, "400": {$ref: '#/components/responses/BadRequest'}}
+  /api/admin/backup:
+    post:
+      tags: [Admin]
+      summary: Create a database backup now
+      responses: {"200": {description: Created, content: {application/json: {schema: {type: object, properties: {message: {type: string}, file: {type: string}}}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/backups:
+    get:
+      tags: [Admin]
+      summary: List stored backups (newest first)
+      responses: {"200": {description: OK, content: {application/json: {schema: {type: object, properties: {backups: {type: array, items: {type: object, properties: {name: {type: string}, size: {type: integer}}}}, every_hours: {type: integer}, keep: {type: integer}}}}}}, "403": {$ref: '#/components/responses/Forbidden'}}
+  /api/admin/backups/{name}/download:
+    get:
+      tags: [Admin]
+      summary: Download a backup file (SQLite database)
+      parameters: [{name: name, in: path, required: true, schema: {type: string, pattern: '^eventsphere-[0-9-]+\.db$'}}]
+      responses: {"200": {description: SQLite file, content: {application/octet-stream: {schema: {type: string, format: binary}}}}, "403": {$ref: '#/components/responses/Forbidden'}, "404": {$ref: '#/components/responses/NotFound'}}

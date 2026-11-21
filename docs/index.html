@@ -1,0 +1,8 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>EventSphere API docs</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css"></head>
+<body><div id="ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+<script>window.onload=()=>SwaggerUIBundle({url:'/docs/openapi.yaml',dom_id:'#ui',deepLinking:true,persistAuthorization:true,
+ // Swagger "Try it out" runs in your browser: log in through the app first, then the session cookie + CSRF token are sent for you.
+ requestInterceptor:r=>{const m=document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);if(m&&r.method!=='GET')r.headers['X-CSRF-Token']=m[1];return r}})</script>
+</body></html>

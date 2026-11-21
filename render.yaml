@@ -1,0 +1,20 @@
+# Render Blueprint: New -> Blueprint -> pick this repo. Deploys are triggered by GitHub Actions (after the tests pass), not on every push.
+services:
+  - type: web
+    name: eventsphere
+    runtime: docker
+    plan: starter            # a persistent disk needs a paid plan
+    autoDeploy: false        # the "deploy" job in .github/workflows/ci.yml calls the deploy hook instead
+    healthCheckPath: /api/health
+    disk: {name: eventsphere-data, mountPath: /data, sizeGB: 1}
+    envVars:
+      - {key: ADMIN_EMAIL, sync: false}
+      - {key: ADMIN_PASSWORD, sync: false}
+      - {key: COLLEGE_NAME, sync: false}
+      - {key: SMTP_URL, sync: false}
+      - {key: SMTP_USER, sync: false}
+      - {key: SMTP_PASS, sync: false}
+      - {key: SMTP_FROM, sync: false}
+      - {key: UTC_OFFSET_MIN, value: "330"}
+      - {key: BACKUP_INTERVAL_HOURS, value: "24"}
+      - {key: BACKUP_KEEP, value: "14"}
